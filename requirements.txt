@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+litellm
+PyYAML
+python-dotenv
