@@ -114,16 +114,17 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         model_aliases = config.get("router_settings", {}).get("model_group_alias", {})
         if model_name in model_aliases:
             model_name = model_aliases[model_name]
-            data["model"] = model_name # Update the model in the data payload
 
         # Find the model's configuration in the model_list
         model_info = next((m for m in config.get("model_list", []) if m.get("model_name") == model_name), None)
 
         if model_info:
-            # If found, get the api_key from its litellm_params
-            config_key = model_info.get("litellm_params", {}).get("api_key")
-            if config_key:
-                data["api_key"] = config_key
+            # Get the entire litellm_params dictionary from the config
+            litellm_params_from_config = model_info.get("litellm_params", {})
+
+            # Combine the config params and the request data.
+            # The config params (e.g., api_key, end_point, model) take precedence over any request values.
+            data = {**data, **litellm_params_from_config}
 
     # === End of New Logic ===
 
