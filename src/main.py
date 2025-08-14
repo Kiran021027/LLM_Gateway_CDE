@@ -121,6 +121,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     original_globals = {}
 
     try:
+        call_data = data.copy()
         if is_azure:
             # WORKAROUND: Set global params for Azure to bypass potential bug
             original_globals = {
@@ -128,11 +129,12 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                 "api_base": litellm.api_base,
                 "api_version": litellm.api_version,
             }
-            litellm.api_key = data.get("api_key")
-            litellm.api_base = data.get("end_point")
-            litellm.api_version = data.get("api_version")
+            # Set global state and remove these keys from the call data
+            litellm.api_key = call_data.pop("api_key", None)
+            litellm.api_base = call_data.pop("end_point", None)
+            litellm.api_version = call_data.pop("api_version", None)
 
-        response = await litellm.acompletion(**data)
+        response = await litellm.acompletion(**call_data)
 
     except Exception as e:
         litellm.print_verbose(f"Gateway Error: {e}")
