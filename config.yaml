@@ -8,20 +8,12 @@ model_list:
   - model_name: "gpt-4.1-mini" # Logical group name for this model
     litellm_params:
       model: "gpt-4.1-mini"
-      api_key: ""
+      api_key: "os.environ/OPENAI_API_KEY"
       end_point: ""
       api_version: ""
     # Per-deployment rate limits can be defined here
     # rpm: 60
     # tpm: 10000
-#    model_name:"gpt-4.1-mini"
-#    little_params:
-#      model:"gpt-4.1-mini"
-#      api_key:""
-#    model_name: "gpt-4o" # Logical group name for this model
-#    litellm_params:
-#      model: "gpt-4o"
-#      api_key: "os.environ/OPENAI_API_KEY"
 
   - model_name: "gpt-4-turbo"
     litellm_params:

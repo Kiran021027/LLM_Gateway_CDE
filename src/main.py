@@ -85,7 +85,7 @@ async def get_models():
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(request: ChatCompletionRequest, http_request: Request):
     """
     Primary endpoint for chat completions.
     Supports both streaming and non-streaming responses.
@@ -94,6 +94,17 @@ async def chat_completions(request: ChatCompletionRequest):
     data = request.dict(exclude_none=True)
     messages = [msg.dict() for msg in request.messages]
     data["messages"] = messages
+
+    # Extract API key from Authorization header
+    auth_header = http_request.headers.get("Authorization")
+    if auth_header:
+        try:
+            scheme, token = auth_header.split()
+            if scheme.lower() == "bearer":
+                data["api_key"] = token
+        except ValueError:
+            # Malformed header, ignore. LiteLLM will fallback to other auth methods.
+            pass
 
     # Basic routing - use model alias if it exists
     model_aliases = config.get("router_settings", {}).get("model_group_alias", {})
