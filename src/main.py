@@ -88,14 +88,12 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     Primary endpoint for chat completions.
     Supports both streaming and non-streaming responses.
     """
-    # Convert Pydantic models to dictionaries for litellm
-    data = request.dict(exclude_none=True)
-    messages = [msg.dict() for msg in request.messages]
-    data["messages"] = messages
+    data = request.model_dump(exclude_none=True)
+    data["messages"] = [msg.model_dump() for msg in request.messages]
 
-    # === Start of New Authentication and Routing Logic ===
+    is_azure = False
+    litellm_params_from_config = {}
 
-    # 1. Check for API key in the Authorization header
     auth_header = http_request.headers.get("Authorization")
     if auth_header:
         try:
@@ -103,59 +101,63 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             if scheme.lower() == "bearer" and token:
                 data["api_key"] = token
         except ValueError:
-            # Malformed header, ignore and fall through to config-based key lookup
             pass
 
-    # 2. If no key from header, look for it in the config file
     if "api_key" not in data:
         model_name = data.get("model")
-
-        # Resolve model alias if it exists
         model_aliases = config.get("router_settings", {}).get("model_group_alias", {})
         if model_name in model_aliases:
             model_name = model_aliases[model_name]
 
-        # Find the model's configuration in the model_list
         model_info = next((m for m in config.get("model_list", []) if m.get("model_name") == model_name), None)
 
         if model_info:
-            # Get the entire litellm_params dictionary from the config
             litellm_params_from_config = model_info.get("litellm_params", {})
-
-            # Combine the config params and the request data.
-            # The config params (e.g., api_key, end_point, model) take precedence over any request values.
+            if litellm_params_from_config.get("model", "").startswith("azure/"):
+                is_azure = True
             data = {**data, **litellm_params_from_config}
 
-    # === End of New Logic ===
+    response = None
+    original_globals = {}
 
     try:
-        # Asynchronous call to litellm.completion
+        if is_azure:
+            # WORKAROUND: Set global params for Azure to bypass potential bug
+            original_globals = {
+                "api_key": litellm.api_key,
+                "api_base": litellm.api_base,
+                "api_version": litellm.api_version,
+            }
+            litellm.api_key = data.get("api_key")
+            litellm.api_base = data.get("end_point")
+            litellm.api_version = data.get("api_version")
+
         response = await litellm.acompletion(**data)
 
-        if request.stream:
-            # For streaming responses, return a StreamingResponse
-            async def stream_generator():
-                async for chunk in response:
-                    yield f"data: {chunk.json()}\n\n"
-                yield "data: [DONE]\n\n"
-            return StreamingResponse(stream_generator(), media_type="text/event-stream")
-        else:
-            # For non-streaming, return the complete response
-            return response
-
     except Exception as e:
-        # Handle exceptions from litellm and return an appropriate error
-        # In a production system, you would have more granular error handling
         litellm.print_verbose(f"Gateway Error: {e}")
-        # Map litellm exceptions to HTTP status codes
         if isinstance(e, litellm.exceptions.RateLimitError):
             raise HTTPException(status_code=429, detail=str(e))
         if isinstance(e, litellm.exceptions.AuthenticationError):
              raise HTTPException(status_code=401, detail=str(e))
         if isinstance(e, litellm.exceptions.BadRequestError):
              raise HTTPException(status_code=400, detail=str(e))
-        # Generic fallback
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if is_azure and original_globals:
+            # ALWAYS restore global state
+            litellm.api_key = original_globals["api_key"]
+            litellm.api_base = original_globals["api_base"]
+            litellm.api_version = original_globals["api_version"]
+
+    if request.stream:
+        async def stream_generator():
+            async for chunk in response:
+                yield f"data: {chunk.json()}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(stream_generator(), media_type="text/event-stream")
+    else:
+        return response
 
 
 if __name__ == "__main__":
