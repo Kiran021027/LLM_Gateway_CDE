@@ -95,21 +95,39 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     messages = [msg.dict() for msg in request.messages]
     data["messages"] = messages
 
-    # Extract API key from Authorization header
+    # === Start of New Authentication and Routing Logic ===
+
+    # 1. Check for API key in the Authorization header
     auth_header = http_request.headers.get("Authorization")
     if auth_header:
         try:
             scheme, token = auth_header.split()
-            if scheme.lower() == "bearer":
+            if scheme.lower() == "bearer" and token:
                 data["api_key"] = token
         except ValueError:
-            # Malformed header, ignore. LiteLLM will fallback to other auth methods.
+            # Malformed header, ignore and fall through to config-based key lookup
             pass
 
-    # Basic routing - use model alias if it exists
-    model_aliases = config.get("router_settings", {}).get("model_group_alias", {})
-    if request.model in model_aliases:
-        data["model"] = model_aliases[request.model]
+    # 2. If no key from header, look for it in the config file
+    if "api_key" not in data:
+        model_name = data.get("model")
+
+        # Resolve model alias if it exists
+        model_aliases = config.get("router_settings", {}).get("model_group_alias", {})
+        if model_name in model_aliases:
+            model_name = model_aliases[model_name]
+            data["model"] = model_name # Update the model in the data payload
+
+        # Find the model's configuration in the model_list
+        model_info = next((m for m in config.get("model_list", []) if m.get("model_name") == model_name), None)
+
+        if model_info:
+            # If found, get the api_key from its litellm_params
+            config_key = model_info.get("litellm_params", {}).get("api_key")
+            if config_key:
+                data["api_key"] = config_key
+
+    # === End of New Logic ===
 
     try:
         # Asynchronous call to litellm.completion
