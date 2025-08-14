@@ -24,8 +24,6 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = None
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
-    endpoint: Optional[str] = None
-    api_version: Optional[str] = None
 
     class Config:
         extra = "allow"
