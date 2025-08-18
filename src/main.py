@@ -29,6 +29,15 @@ class ChatCompletionRequest(BaseModel):
         extra = "allow"
 
 
+class EmbeddingRequest(BaseModel):
+    model: str
+    input: Union[str, List[str]]
+    user: Optional[str] = None
+
+    class Config:
+        extra = "allow"
+
+
 # --- Configuration Management ---
 def load_config():
     """Loads the config.yaml file."""
@@ -160,6 +169,77 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
     else:
         return response
+
+
+@app.post("/v1/embeddings")
+async def embeddings(request: EmbeddingRequest, http_request: Request):
+    """
+    Endpoint for creating embeddings.
+    """
+    data = request.model_dump(exclude_none=True)
+
+    is_azure = False
+    litellm_params_from_config = {}
+
+    auth_header = http_request.headers.get("Authorization")
+    if auth_header:
+        try:
+            scheme, token = auth_header.split()
+            if scheme.lower() == "bearer" and token:
+                data["api_key"] = token
+        except ValueError:
+            pass
+
+    if "api_key" not in data:
+        model_name = data.get("model")
+        model_aliases = config.get("router_settings", {}).get("model_group_alias", {})
+        if model_name in model_aliases:
+            model_name = model_aliases[model_name]
+
+        model_info = next((m for m in config.get("model_list", []) if m.get("model_name") == model_name), None)
+
+        if model_info:
+            litellm_params_from_config = model_info.get("litellm_params", {})
+            if litellm_params_from_config.get("model", "").startswith("azure/"):
+                is_azure = True
+            data = {**data, **litellm_params_from_config}
+
+    response = None
+    original_globals = {}
+
+    try:
+        call_data = data.copy()
+        if is_azure:
+            # WORKAROUND: Set global params for Azure to bypass potential bug
+            original_globals = {
+                "api_key": litellm.api_key,
+                "api_base": litellm.api_base,
+                "api_version": litellm.api_version,
+            }
+            # Set global state and remove these keys from the call data
+            litellm.api_key = call_data.pop("api_key", None)
+            litellm.api_base = call_data.pop("end_point", None)
+            litellm.api_version = call_data.pop("api_version", None)
+
+        response = await litellm.aembedding(**call_data)
+
+    except Exception as e:
+        litellm.print_verbose(f"Gateway Error: {e}")
+        if isinstance(e, litellm.exceptions.RateLimitError):
+            raise HTTPException(status_code=429, detail=str(e))
+        if isinstance(e, litellm.exceptions.AuthenticationError):
+             raise HTTPException(status_code=401, detail=str(e))
+        if isinstance(e, litellm.exceptions.BadRequestError):
+             raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if is_azure and original_globals:
+            # ALWAYS restore global state
+            litellm.api_key = original_globals["api_key"]
+            litellm.api_base = original_globals["api_base"]
+            litellm.api_version = original_globals["api_version"]
+
+    return response
 
 
 if __name__ == "__main__":
