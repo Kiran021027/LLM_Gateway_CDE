@@ -3,3 +3,4 @@ uvicorn[standard]
 litellm
 PyYAML
 python-dotenv
+boto3
