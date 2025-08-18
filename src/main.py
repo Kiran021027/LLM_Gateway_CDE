@@ -249,5 +249,5 @@ async def embeddings(request: EmbeddingRequest, http_request: Request):
 if __name__ == "__main__":
     import uvicorn
     # This is for local development and testing.
-    # In production, you would use a Gunicorn or similar ASGI server.
+    # In production, you would use a Gunicorn or similar ASGI server.hi
     uvicorn.run(app, host="0.0.0.0", port=8000)
