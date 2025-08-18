@@ -1,10 +1,16 @@
 import os
 import yaml
 import litellm
+import numpy as np
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Union, Dict, Any
+
+# --- In-Memory Vector Store ---
+# A simple list to store tuples of (text, vector)
+vector_store = []
+
 
 # --- Pydantic Models for OpenAI Compatibility ---
 class ChatMessage(BaseModel):
@@ -37,6 +43,12 @@ class EmbeddingRequest(BaseModel):
 
     class Config:
         extra = "allow"
+
+
+class SearchRequest(BaseModel):
+    query: str
+    embedding_model: str
+    top_k: Optional[int] = 1
 
 
 # --- Configuration Management ---
@@ -173,8 +185,14 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
                     litellm.api_version = embedding_call_data.pop("api_version", None)
 
                 embedding_response = await litellm.aembedding(**embedding_call_data)
+
+                embedding_vector = embedding_response.data[0].embedding
                 # Attach embedding to the original response
-                response.choices[0]['embedding'] = embedding_response.data[0]['embedding']
+                response.choices[0]['embedding'] = embedding_vector
+
+                # Save the text and its vector to our in-memory store
+                print(f"--- Saving to vector store: {text_to_embed[:50]}... ---")
+                vector_store.append((text_to_embed, embedding_vector))
 
             finally:
                 if embedding_is_azure and embedding_original_globals:
@@ -244,6 +262,74 @@ async def embeddings(request: EmbeddingRequest, http_request: Request):
             litellm.api_version = original_globals["api_version"]
 
     return response
+
+
+@app.post("/v1/search")
+async def search(request: SearchRequest, http_request: Request):
+    """
+    Searches the in-memory vector store for the most similar text.
+    """
+    if not vector_store:
+        return {"error": "Vector store is empty. Please generate some embeddings first."}
+
+    # 1. Get the embedding for the search query
+    embedding_request_data = {
+        "model": request.embedding_model,
+        "input": request.query
+    }
+    embedding_call_data, is_azure = await _prepare_litellm_call(embedding_request_data, http_request)
+
+    query_vector = None
+    original_globals = {}
+
+    try:
+        if is_azure:
+            original_globals = {"api_key": litellm.api_key, "api_base": litellm.api_base, "api_version": litellm.api_version}
+            litellm.api_key = embedding_call_data.pop("api_key", None)
+            litellm.api_base = embedding_call_data.pop("end_point", None)
+            litellm.api_version = embedding_call_data.pop("api_version", None)
+
+        embedding_response = await litellm.aembedding(**embedding_call_data)
+        query_vector = embedding_response.data[0].embedding
+
+    except Exception as e:
+        # Re-raise as an HTTPException to be handled by FastAPI
+        raise HTTPException(status_code=500, detail=f"Error getting query embedding: {e}")
+    finally:
+        if is_azure and original_globals:
+            litellm.api_key = original_globals["api_key"]
+            litellm.api_base = original_globals["api_base"]
+            litellm.api_version = original_globals["api_version"]
+
+    if not query_vector:
+        raise HTTPException(status_code=500, detail="Failed to create an embedding for the query.")
+
+    # 2. Perform cosine similarity search
+    query_vector_np = np.array(query_vector)
+
+    # Separate the texts and vectors from the store
+    stored_texts = [item[0] for item in vector_store]
+    stored_vectors = np.array([item[1] for item in vector_store])
+
+    # Calculate cosine similarity
+    dot_products = np.dot(stored_vectors, query_vector_np)
+    stored_norms = np.linalg.norm(stored_vectors, axis=1)
+    query_norm = np.linalg.norm(query_vector_np)
+
+    similarities = dot_products / (stored_norms * query_norm)
+
+    # 3. Find and return the best matches
+    # Get the indices of the top_k best scores
+    top_k_indices = np.argsort(similarities)[-request.top_k:][::-1]
+
+    results = []
+    for index in top_k_indices:
+        results.append({
+            "text": stored_texts[index],
+            "similarity": similarities[index]
+        })
+
+    return {"results": results}
 
 
 if __name__ == "__main__":
