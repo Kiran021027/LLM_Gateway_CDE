@@ -52,6 +52,12 @@ litellm_settings:
   # Enables verbose logging from the litellm library for debugging.
   set_verbose: true
 
+  # Enables in-memory caching for responses.
+  cache: true
+  cache_params:
+    type: "local"  # Use the simple in-memory cache.
+    ttl: 600       # Cache responses for 10 minutes.
+
   # Global list of models to use as a last resort if a specific model group's fallbacks fail.
   # default_fallbacks: ["gpt-4o"]
 
