@@ -40,12 +40,60 @@ class EmbeddingRequest(BaseModel):
 
 
 # --- Configuration Management ---
+def validate_api_keys(config: dict):
+    """
+    Validates the API keys loaded from the configuration.
+    Checks for the correct prefixes for OpenAI and Anthropic keys.
+    """
+    model_list = config.get("model_list", [])
+    for model in model_list:
+        api_key_source = model.get("litellm_params", {}).get("api_key")
+        if not api_key_source:
+            continue
+
+        api_key = None
+        if api_key_source.startswith("os.environ/"):
+            env_var_name = api_key_source.split('/')[-1]
+            api_key = os.getenv(env_var_name)
+            if not api_key:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"API key environment variable '{env_var_name}' is not set."
+                )
+        else:
+            # The key is hardcoded in the config file
+            api_key = api_key_source
+
+        if not api_key:
+            # This case should ideally not be hit if config is well-formed, but as a safeguard:
+            raise HTTPException(
+                status_code=500,
+                detail=f"API key for model '{model.get('model_name')}' is missing or could not be resolved."
+            )
+
+        # Validate OpenAI keys
+        if "gpt" in model.get("model_name", "") and not api_key.startswith("sk-"):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Invalid OpenAI API key format for model '{model.get('model_name')}'. Key must start with 'sk-'. The provided key starts with '{api_key[:4]}...'"
+            )
+
+        # Validate Anthropic keys
+        if "claude" in model.get("model_name", "") and not api_key.startswith("sk-ant-"):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Invalid Anthropic API key format for model '{model.get('model_name')}'. Key must start with 'sk-ant-'. The provided key starts with '{api_key[:8]}...'"
+            )
+
+
 def load_config():
-    """Loads the config.yaml file."""
+    """Loads the config.yaml file and validates API keys."""
     config_path = os.path.join(os.path.dirname(__file__), '..', 'config.yaml')
     try:
         with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
+            config_data = yaml.safe_load(f)
+            validate_api_keys(config_data)  # Validate keys after loading
+            return config_data
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="config.yaml not found.")
     except yaml.YAMLError as e:
