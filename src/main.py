@@ -133,11 +133,11 @@ async def _prepare_litellm_call(request_data: dict, http_request: Request):
         except ValueError:
             pass  # Ignore malformed headers
 
-    # 4. For Azure, ensure the 'model' parameter is the deployment name, not the full model identifier.
-    # litellm expects the deployment name for the 'model' parameter.
+    # 4. For Azure, ensure the 'model' parameter is prefixed with 'azure/'.
+    # litellm requires this prefix to identify the call as an Azure call.
     if model_info and ".azure.com" in request_data.get("api_base", ""):
-        # The 'model' in litellm_params is the deployment name.
-        request_data["model"] = model_info.get("litellm_params", {}).get("model")
+        deployment_name = model_info.get("litellm_params", {}).get("model")
+        request_data["model"] = f"azure/{deployment_name}"
 
     return request_data
 
