@@ -114,11 +114,11 @@ async def _prepare_litellm_call(request_data: dict, http_request: Request):
         if "end_point" in litellm_params and ".azure.com" in litellm_params["end_point"]:
             litellm_params["api_base"] = litellm_params.pop("end_point")
 
-        # Resolve API key from environment if it's specified that way.
-        api_key_source = litellm_params.get("api_key", "")
-        if isinstance(api_key_source, str) and api_key_source.startswith("os.environ/"):
-            env_var_name = api_key_source.split('/')[-1]
-            litellm_params["api_key"] = os.getenv(env_var_name)
+        # Resolve any values sourced from environment variables.
+        for key, value in litellm_params.items():
+            if isinstance(value, str) and value.startswith("os.environ/"):
+                env_var_name = value.split('/')[-1]
+                litellm_params[key] = os.getenv(env_var_name)
 
         # Merge the loaded config into the request data. This sets the base parameters.
         request_data = {**request_data, **litellm_params}
