@@ -71,8 +71,9 @@ def validate_api_keys(config: dict):
                 detail=f"API key for model '{model.get('model_name')}' is missing or could not be resolved."
             )
 
-        # Validate OpenAI keys
-        if "gpt" in model.get("model_name", "") and not api_key.startswith("sk-"):
+        # For non-Azure OpenAI keys, validate the 'sk-' prefix
+        is_azure_model = model.get("litellm_params", {}).get("model", "").startswith("azure/")
+        if "gpt" in model.get("model_name", "") and not is_azure_model and not api_key.startswith("sk-"):
             raise HTTPException(
                 status_code=500,
                 detail=f"Invalid OpenAI API key format for model '{model.get('model_name')}'. Key must start with 'sk-'. The provided key starts with '{api_key[:4]}...'"
@@ -142,13 +143,10 @@ async def get_models():
 
 async def _prepare_litellm_call(request_data: dict, http_request: Request):
     """
-    A helper function to prepare the data payload for a litellm call.
-    It handles authentication, configuration lookups, and the Azure workaround.
-    Returns the final data for the call and a flag indicating if it's an Azure request.
+    Prepares the data payload for a litellm call by handling authentication
+    and merging model-specific configuration.
     """
-    is_azure = False
-
-    # 1. Check for API key in the Authorization header
+    # 1. Check for API key in the Authorization header (Bearer Token)
     auth_header = http_request.headers.get("Authorization")
     if auth_header:
         try:
@@ -156,24 +154,31 @@ async def _prepare_litellm_call(request_data: dict, http_request: Request):
             if scheme.lower() == "bearer" and token:
                 request_data["api_key"] = token
         except ValueError:
-            pass
+            pass  # Ignore malformed headers
 
-    # 2. If no key from header, look for it in the config file
+    # 2. If no API key from header, merge configuration from config.yaml
     if "api_key" not in request_data:
         model_name = request_data.get("model")
         model_aliases = config.get("router_settings", {}).get("model_group_alias", {})
+
+        # Resolve model alias to the actual model group name
         if model_name in model_aliases:
             model_name = model_aliases[model_name]
 
+        # Find the matching model configuration
         model_info = next((m for m in config.get("model_list", []) if m.get("model_name") == model_name), None)
 
         if model_info:
-            litellm_params_from_config = model_info.get("litellm_params", {})
-            if litellm_params_from_config.get("model", "").startswith("azure/"):
-                is_azure = True
-            request_data = {**request_data, **litellm_params_from_config}
+            litellm_params = model_info.get("litellm_params", {}).copy()
 
-    return request_data, is_azure
+            # For Azure, 'end_point' from config becomes 'api_base' for litellm
+            if "end_point" in litellm_params:
+                litellm_params["api_base"] = litellm_params.pop("end_point")
+
+            # Merge the resolved parameters into the request data
+            request_data = {**request_data, **litellm_params}
+
+    return request_data
 
 
 @app.post("/v1/chat/completions")
@@ -184,52 +189,31 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     Also supports chaining an embedding request.
     """
     request_data = request.model_dump(exclude_none=True)
-
-    # Extract the embedding request details before they are removed
     embedding_model = request_data.pop("embed_with_model", None)
 
-    call_data, is_azure = await _prepare_litellm_call(request_data, http_request)
-
-    response = None
-    original_globals = {}
-
     try:
-        if is_azure:
-            original_globals = {"api_key": litellm.api_key, "api_base": litellm.api_base, "api_version": litellm.api_version}
-            litellm.api_key = call_data.pop("api_key", None)
-            litellm.api_base = call_data.pop("end_point", None)
-            litellm.api_version = call_data.pop("api_version", None)
-
+        # Prepare the primary litellm call
+        call_data = await _prepare_litellm_call(request_data, http_request)
         response = await litellm.acompletion(**call_data)
 
-        # After getting a successful response, check if we need to embed it
+        # If embedding is requested, perform the second call (non-streaming only)
         if embedding_model and response.choices and not request.stream:
             text_to_embed = response.choices[0].message.content
-
             embedding_request_data = {"model": embedding_model, "input": text_to_embed}
 
-            # Prepare the embedding call, it might be a different provider
-            embedding_call_data, embedding_is_azure = await _prepare_litellm_call(embedding_request_data, http_request)
+            # Prepare and execute the embedding call
+            embedding_call_data = await _prepare_litellm_call(embedding_request_data, http_request)
+            embedding_response = await litellm.aembedding(**embedding_call_data)
 
-            embedding_response = None
-            embedding_original_globals = {}
-            try:
-                if embedding_is_azure:
-                    embedding_original_globals = {"api_key": litellm.api_key, "api_base": litellm.api_base, "api_version": litellm.api_version}
-                    litellm.api_key = embedding_call_data.pop("api_key", None)
-                    litellm.api_base = embedding_call_data.pop("end_point", None)
-                    litellm.api_version = embedding_call_data.pop("api_version", None)
+            # Attach the embedding to the response.
+            # We convert the response to a dictionary to add the new key.
+            response_dict = response.model_dump()
+            if response_dict.get("choices"):
+                 response_dict["choices"][0]["embedding"] = embedding_response.data[0]['embedding']
 
-                embedding_response = await litellm.aembedding(**embedding_call_data)
-                # Attach embedding to the original response
-                response.choices[0]['embedding'] = embedding_response.data[0]['embedding']
-
-            finally:
-                if embedding_is_azure and embedding_original_globals:
-                    litellm.api_key = embedding_original_globals["api_key"]
-                    litellm.api_base = embedding_original_globals["api_base"]
-                    litellm.api_version = embedding_original_globals["api_version"]
-
+            # The endpoint will now return a dict instead of a ModelResponse object,
+            # which FastAPI will serialize to JSON.
+            return response_dict
 
     except Exception as e:
         litellm.print_verbose(f"Gateway Error: {e}")
@@ -240,11 +224,6 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
         if isinstance(e, litellm.exceptions.BadRequestError):
              raise HTTPException(status_code=400, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if is_azure and original_globals:
-            litellm.api_key = original_globals["api_key"]
-            litellm.api_base = original_globals["api_base"]
-            litellm.api_version = original_globals["api_version"]
 
     if request.stream:
         async def stream_generator():
@@ -262,18 +241,9 @@ async def embeddings(request: EmbeddingRequest, http_request: Request):
     Endpoint for creating embeddings.
     """
     request_data = request.model_dump(exclude_none=True)
-    call_data, is_azure = await _prepare_litellm_call(request_data, http_request)
-
-    response = None
-    original_globals = {}
 
     try:
-        if is_azure:
-            original_globals = {"api_key": litellm.api_key, "api_base": litellm.api_base, "api_version": litellm.api_version}
-            litellm.api_key = call_data.pop("api_key", None)
-            litellm.api_base = call_data.pop("end_point", None)
-            litellm.api_version = call_data.pop("api_version", None)
-
+        call_data = await _prepare_litellm_call(request_data, http_request)
         response = await litellm.aembedding(**call_data)
 
     except Exception as e:
@@ -285,11 +255,6 @@ async def embeddings(request: EmbeddingRequest, http_request: Request):
         if isinstance(e, litellm.exceptions.BadRequestError):
              raise HTTPException(status_code=400, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if is_azure and original_globals:
-            litellm.api_key = original_globals["api_key"]
-            litellm.api_base = original_globals["api_base"]
-            litellm.api_version = original_globals["api_version"]
 
     return response
 
