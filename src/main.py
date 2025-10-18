@@ -71,9 +71,12 @@ def validate_api_keys(config: dict):
                 detail=f"API key for model '{model.get('model_name')}' is missing or could not be resolved."
             )
 
-        # For non-Azure OpenAI keys, validate the 'sk-' prefix
-        is_azure_model = model.get("litellm_params", {}).get("model", "").startswith("azure/")
-        if "gpt" in model.get("model_name", "") and not is_azure_model and not api_key.startswith("sk-"):
+        # For non-Azure OpenAI keys, validate the 'sk-' prefix.
+        # A reliable way to detect an Azure deployment is by checking for the .azure.com domain in the endpoint.
+        litellm_params = model.get("litellm_params", {})
+        is_azure_deployment = ".azure.com" in litellm_params.get("end_point", "")
+
+        if "gpt" in model.get("model_name", "") and not is_azure_deployment and not api_key.startswith("sk-"):
             raise HTTPException(
                 status_code=500,
                 detail=f"Invalid OpenAI API key format for model '{model.get('model_name')}'. Key must start with 'sk-'. The provided key starts with '{api_key[:4]}...'"
